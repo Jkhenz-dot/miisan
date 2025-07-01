@@ -1,1 +1,16 @@
-{}
+{
+  "1228329411833499649": {
+    "serverChatHistory": false,
+    "settingsSaveButton": true,
+    "customServerPersonality": false,
+    "serverResponsePreference": false,
+    "responseStyle": "normal"
+  },
+  "1206274128588578826": {
+    "serverChatHistory": false,
+    "settingsSaveButton": true,
+    "customServerPersonality": false,
+    "serverResponsePreference": false,
+    "responseStyle": "normal"
+  }
+}

@@ -13,7 +13,8 @@
     "office-text-extractor": "^3.0.3",
     "sharp": "^0.34.2",
     "ws": "^8.18.2",
-    "youtube-transcript": "^1.2.1"
+    "youtube-transcript": "^1.2.1",
+     "canvacord": "^6.0.2"
   },
   "scripts": {
     "start": "node index.js"

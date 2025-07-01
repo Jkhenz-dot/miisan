@@ -8,11 +8,11 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
+
   PermissionsBitField,
   EmbedBuilder,
   ActivityType,
   ComponentType,
-  AttachmentBuilder,
   REST,
   Routes,
 } from "discord.js";
@@ -30,10 +30,6 @@ import { getTextExtractor } from "office-text-extractor";
 import osu from "node-os-utils";
 const { mem, cpu } = osu;
 import axios from "axios";
-import canvacord from "canvacord";
-const { RankCardBuilder, Font } = canvacord;
-
-await Font.loadDefault();
 
 import config from "./config.js";
 
@@ -56,7 +52,7 @@ const activeRequests = new Set();
 // Define your objects
 let chatHistories = {};
 let activeUsersInChannels = {};
-
+let customInstructions = {};
 let serverSettings = {};
 let userResponsePreference = {};
 let alwaysRespondChannels = {};
@@ -68,12 +64,6 @@ let xpData = {}; // Stores XP and levels per user per guild
 let xpSettings = {}; // Stores per-guild settings: minXP, maxXP, delay
 let levelUpChannels = {};
 let aiRespondChannel = null;
-let bioDescription = "";
-let botPresence = {
-  status: "online",
-  activityType: "Playing",
-  activityText: "with code",
-};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -89,9 +79,8 @@ const FILE_PATHS = {
   xpSettings: path.join(CONFIG_DIR, "xp_settings.json"),
   birthdays: path.join(CONFIG_DIR, "birthdays.json"),
   activeUsersInChannels: path.join(CONFIG_DIR, "active_users_in_channels.json"),
+  customInstructions: path.join(CONFIG_DIR, "custom_instructions.json"),
   serverSettings: path.join(CONFIG_DIR, "server_settings.json"),
-  bioDescription: path.join(CONFIG_DIR, "bio_description.json"),
-  botPresence: path.join(CONFIG_DIR, "bot_presence.json"),
 
   userResponsePreference: path.join(
     CONFIG_DIR,
@@ -278,21 +267,6 @@ client.once("ready", async () => {
   } catch (error) {
     console.error(error);
   }
-
-  if (botPresence?.activityText) {
-    client.user.setPresence({
-      status: botPresence.status || "online",
-      activities: [
-        {
-          name: botPresence.activityText,
-          type:
-            ActivityType[
-              (botPresence.activityType || "Playing").toUpperCase()
-            ] || ActivityType.Playing,
-        },
-      ],
-    });
-  }
 });
 
 // <==========>
@@ -466,16 +440,17 @@ async function handleCommandInteraction(interaction) {
     purge: handlePurgeCommand,
     bday: handleBdayCommand,
     "autoreact-forum": handleAutoReactCommand,
-    "level-announcement": handleLevelChannel, // <-- Add this line
-    "level-settings": handleXPSettings,
+    "level-channel": handleLevelChannel, // <-- Add this line
+    "xp-settings": handleXPSettings,
     level: handleRank,
     say: handleSayCommand,
+
     "react-message": handleReactMessageCommand,
+
     "custom-name": handleCustomName,
     "custom-bio": handleCustomBio,
     "custom-avatar": handleCustomAvatar,
     "custom-status": handleCustomStatus,
-    "say-embed": handleSayEmbed,
   };
 
   const handler = commandHandlers[interaction.commandName];
@@ -614,6 +589,40 @@ async function handleClearMemoryCommand(interaction) {
   }
 }
 
+async function handleCustomPersonalityCommand(interaction) {
+  const serverCustomEnabled = interaction.guild
+    ? serverSettings[interaction.guild.id]?.customServerPersonality
+    : false;
+  if (!serverCustomEnabled) {
+    await setCustomPersonality(interaction);
+  } else {
+    const embed = new EmbedBuilder()
+      .setColor(0xff5555)
+      .setTitle("Feature Disabled")
+      .setDescription(
+        "Custom personality is not enabled for this server, Server-Wide personality is active.",
+      );
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+}
+
+async function handleRemovePersonalityCommand(interaction) {
+  const isServerEnabled = interaction.guild
+    ? serverSettings[interaction.guild.id]?.customServerPersonality
+    : false;
+  if (!isServerEnabled) {
+    await removeCustomPersonality(interaction);
+  } else {
+    const embed = new EmbedBuilder()
+      .setColor(0xff5555)
+      .setTitle("Feature Disabled")
+      .setDescription(
+        "Custom personality is not enabled for this server, Server-Wide personality is active.",
+      );
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+}
+
 async function handleToggleResponseMode(interaction) {
   const serverResponsePreferenceEnabled = interaction.guild
     ? serverSettings[interaction.guild.id]?.serverResponsePreference
@@ -638,7 +647,6 @@ async function handleTextMessage(message) {
   const userId = message.author.id;
   const guildId = message.guild?.id;
   const channelId = message.channel.id;
-
   let messageContent = message.content
     .replace(new RegExp(`<@!?${botId}>`), "")
     .trim();
@@ -647,9 +655,16 @@ async function handleTextMessage(message) {
     messageContent === "" &&
     !(message.attachments.size > 0 && hasSupportedAttachments(message))
   ) {
-    return; // skip empty messages with no valid attachments
-  }
+    const embed = new EmbedBuilder()
+      .setColor(0x00ffff)
+      .setTitle("Empty Message")
+      .setDescription(
+        "It looks like you didn't say anything. What would you like to talk about?",
+      );
+    const botMessage = await message.reply({ embeds: [embed] });
 
+    return;
+  }
   message.channel.sendTyping();
   const typingInterval = setInterval(() => {
     message.channel.sendTyping();
@@ -657,27 +672,66 @@ async function handleTextMessage(message) {
   setTimeout(() => {
     clearInterval(typingInterval);
   }, 120000);
-
-  let botMessage = null;
+  let botMessage = false;
   let parts;
-
   try {
-    messageContent = await extractFileText(message, messageContent);
-    parts = await processPromptAndMediaAttachments(messageContent, message);
-  } catch (error) {
-    clearInterval(typingInterval);
-    console.error("Error processing message:", error);
+    if (SEND_RETRY_ERRORS_TO_DISCORD) {
+      clearInterval(typingInterval);
+      const updateEmbedDescription = (
+        textAttachmentStatus,
+        imageAttachmentStatus,
+        finalText,
+      ) => {
+        return `Let me think...\n\n- ${textAttachmentStatus}: Text Attachment Check\n- ${imageAttachmentStatus}: Media Attachment Check\n${finalText || ""}`;
+      };
 
-    const errorEmbed = new EmbedBuilder()
-      .setColor(0xff0000)
-      .setTitle("Error")
-      .setDescription("Something went wrong while processing your message.");
-    await message.reply({ embeds: [errorEmbed] });
-    return;
+      const embed = new EmbedBuilder()
+        .setColor(0x00ffff)
+        .setTitle("Processing")
+        .setDescription(updateEmbedDescription("[🔁]", "[🔁]"));
+      botMessage = await message.reply({ embeds: [embed] });
+
+      messageContent = await extractFileText(message, messageContent);
+      embed.setDescription(updateEmbedDescription("[☑️]", "[🔁]"));
+      await botMessage.edit({ embeds: [embed] });
+
+      parts = await processPromptAndMediaAttachments(messageContent, message);
+      embed.setDescription(
+        updateEmbedDescription(
+          "[☑️]",
+          "[☑️]",
+          "### All checks done. Waiting for the response...",
+        ),
+      );
+      await botMessage.edit({ embeds: [embed] });
+    } else {
+      messageContent = await extractFileText(message, messageContent);
+      parts = await processPromptAndMediaAttachments(messageContent, message);
+    }
+  } catch (error) {
+    return console.error("Error initialising message", error);
   }
 
-  // Build infoStr with only context (no instruction rules)
+  let instructions;
+  if (guildId) {
+    if (channelWideChatHistory[channelId]) {
+      instructions = customInstructions[channelId];
+    } else if (
+      serverSettings[guildId]?.customServerPersonality &&
+      customInstructions[guildId]
+    ) {
+      instructions = customInstructions[guildId];
+    } else {
+      instructions = customInstructions[userId];
+    }
+  } else {
+    instructions = customInstructions[userId];
+  }
+
+  activeRequests.add(userId);
+
   let infoStr = "";
+
   if (message.guild) {
     const guild = message.guild;
     const member = await guild.members.fetch(message.author.id);
@@ -688,10 +742,10 @@ async function handleTextMessage(message) {
       id: message.author.id,
       createdAt: message.author.createdAt.toDateString(),
       joinedAt: member.joinedAt?.toDateString() || "Unknown",
-      nickname: member.nickname || message.member?.displayName,
+      nickname: member.nickname || "None",
       roles:
         member.roles.cache
-          .filter((r) => r.id !== guild.id)
+          .filter((r) => r.id !== guild.id) // filter out @everyone role
           .map((r) => r.name)
           .join(", ") || "None",
       highestRole: member.roles.highest.name,
@@ -702,6 +756,7 @@ async function handleTextMessage(message) {
       presenceStatus: member.presence?.status || "offline",
     };
 
+    // Prepare emojis in Discord emoji syntax for message usage
     const emojis = guild.emojis.cache;
     const emojiStrings = emojis.map((e) =>
       e.animated ? `<a:${e.name}:${e.id}>` : `<:${e.name}:${e.id}>`,
@@ -721,9 +776,12 @@ async function handleTextMessage(message) {
       verificationLevel: guild.verificationLevel,
       nsfwLevel: guild.nsfwLevel,
       locale: guild.preferredLocale,
+      iconURL: guild.iconURL({ dynamic: true }),
+      bannerURL: guild.bannerURL(),
+      splashURL: guild.splashURL(),
+      emojiList: emojiStrings.join(" "),
     };
 
-    const emojiDisplay = emojiStrings.join(" ");
     const channelInfo = {
       name: message.channel.name,
       id: message.channel.id,
@@ -732,63 +790,69 @@ async function handleTextMessage(message) {
     };
 
     infoStr = `
+  You both currently engaging in the **${guildInfo.name}** Discord server.
+ 
 
-    Your name is ${client.user.username}.
+  ## 🧠 Server Information
+  - Name: \`${guildInfo.name}\`
+  - ID: \`${guildInfo.id}\`
+  - Created At: \`${guildInfo.createdAt}\`
+  - Members: \`${guildInfo.memberCount}\`
+  - Roles: \`${guildInfo.roleCount}\`
+  - Emojis: \`${guildInfo.emojiCount}\` (Animated: ${guildInfo.animatedEmojiCount}, Static: ${guildInfo.staticEmojiCount})
+  - Boost Level: \`${guildInfo.boostLevel}\` (${guildInfo.boostCount} boosts)
+  - NSFW Level: \`${guildInfo.nsfwLevel}\`
+  - Verification Level: \`${guildInfo.verificationLevel}\`
+  - Locale: \`${guildInfo.locale}\`
 
-You must always address ${userInfo.username} as ${userInfo.nickname}.
-You are a roleplayer. Always reply with 2 to 3 normal sentences and 1 to 2 *roleplay sentence*.
-Add "\n" to separate normal and *roleplay sentences*.
-Use Discord server emojis when expressing emotions or reactions, and format them like <emoji_name:emoji_id> or <a:emoji_name:emoji_id> (for animated).
+  ### 🎭 Server Emojis
+  ${guildInfo.emojiList || "No custom emojis"}
 
-Do not use Unicode emojis or :emoji_name: format. Only use the exact formats provided below.
+  ## 👤 User Information
+  - Username: \`${userInfo.username}\`
+  - ID: \`${userInfo.id}\`
+  - Display Name: \`${userInfo.displayName}\`
+  - Nickname: \`${userInfo.nickname}\`
+  - Joined Server: \`${userInfo.joinedAt}\`
+  - Account Created: \`${userInfo.createdAt}\`
+  - Roles: ${userInfo.roles}
+  - Highest Role: \`${userInfo.highestRole}\`
+  - Voice Channel: \`${userInfo.voiceChannel}\`
+  - Presence Status: \`${userInfo.presenceStatus}\`
+  - Bot: \`${userInfo.isBot ? "Yes" : "No"}\`
 
-## Server Emojis
-${emojiDisplay}
 
 
-You are in the **${guildInfo.name}** Discord server.
 
-## Server Information
-- Name: ${guildInfo.name}
-- ID: ${guildInfo.id}
-- Created At: ${guildInfo.createdAt}
-- Members: ${guildInfo.memberCount}
-- Roles: ${guildInfo.roleCount}
-- Emojis: ${guildInfo.emojiCount} (Animated: ${guildInfo.animatedEmojiCount}, Static: ${guildInfo.staticEmojiCount})
-- Boost Level: ${guildInfo.boostLevel} (${guildInfo.boostCount} boosts)
-- NSFW Level: ${guildInfo.nsfwLevel}
-- Verification Level: ${guildInfo.verificationLevel}
-- Locale: ${guildInfo.locale}
+You both always adress \`${userInfo.username}\` as \`${userInfo.nickname}\` if the name is  not "None".
+ You both focus on using server emojis with <> and id and name format from now on and avoid any other formats when related in converstations.
+ You both are a mascot in this server.
+ Your name is Mimi and Noin, you both are bestfriend to each other since childhood.
+ Youre two people.
+ Seperate dialouge add two ** at first and last on their name and start then 
+ Add *role playing actions dialouge*.1 sentence.
+ Add new line between each dialouge.
+ One is unnecessary to talk, depends whom \`${userInfo.username}\` the one who talking to. Both talk if not sure whom is \`${userInfo.username}\` talking to. Dont mention users with @".
+ 
+ 
 
-## User Information
-- Username: ${userInfo.username}
-- ID: ${userInfo.id}
-- Display Name: ${userInfo.displayName}
-- Nickname: ${userInfo.nickname}
-- Joined Server: ${userInfo.joinedAt}
-- Account Created: ${userInfo.createdAt}
-- Roles: ${userInfo.roles}
-- Highest Role: ${userInfo.highestRole}
-- Voice Channel: ${userInfo.voiceChannel}
-- Presence Status: ${userInfo.presenceStatus}
-- Bot: ${userInfo.isBot ? "Yes" : "No"}
-
-## Channel Information
-- Channel Name: ${channelInfo.name}
-- Channel ID: ${channelInfo.id}
-- Type: ${channelInfo.type}
-- NSFW: ${channelInfo.isNSFW ? "Yes" : "No"}
-`.trim();
+  ## 🛰️ Channel Information
+  - Channel Name: \`${channelInfo.name}\`
+  - Channel ID: \`${channelInfo.id}\`
+  - Type: \`${channelInfo.type}\`
+  - NSFW: \`${channelInfo.isNSFW ? "Yes" : "No"}\`
+  `.trim();
   }
 
   const isServerChatHistoryEnabled = guildId
     ? serverSettings[guildId]?.serverChatHistory
     : false;
-
   const isChannelChatHistoryEnabled = guildId
     ? channelWideChatHistory[channelId]
     : false;
-
+  const finalInstructions = isServerChatHistoryEnabled
+    ? instructions + infoStr
+    : instructions;
   const historyId = isChannelChatHistoryEnabled
     ? isServerChatHistoryEnabled
       ? guildId
@@ -799,7 +863,7 @@ You are in the **${guildInfo.name}** Discord server.
     model: MODEL,
     systemInstruction: {
       role: "system",
-      parts: [{ text: infoStr }],
+      parts: [{ text: finalInstructions || infoStr }],
     },
     generationConfig,
     tools: { functionDeclarations: function_declarations },
@@ -1279,12 +1343,12 @@ async function handleXP(message) {
   saveStateToFile(); // persist updated XP data
 }
 
+// /rank handler
 async function handleRank(interaction) {
   const target = interaction.options.getUser("user") || interaction.user;
   const userId = target.id;
   const guildId = interaction.guildId;
 
-  // Check if user has XP data
   if (!xpData[guildId] || !xpData[guildId][userId]) {
     return interaction.reply({
       content: `${target.username} hasn't earned any XP yet.`,
@@ -1295,132 +1359,26 @@ async function handleRank(interaction) {
   const { xp, level } = xpData[guildId][userId];
   const nextLevelXP = Math.floor(Math.pow((level + 1) / 0.1, 2));
   const currentLevelXP = Math.floor(Math.pow(level / 0.1, 2));
+  const progress = xp - currentLevelXP;
+  const needed = nextLevelXP - currentLevelXP;
+  const barLength = 20;
+  const filled = Math.round((progress / needed) * barLength);
+  const bar = "🟦".repeat(filled) + "⬛".repeat(barLength - filled);
 
-  // Calculate user's rank (based on total XP across users in the guild)
-  const sorted = Object.entries(xpData[guildId])
-    .sort(([, a], [, b]) => b.xp - a.xp)
-    .map(([id]) => id);
-
-  const rankPosition = sorted.indexOf(userId) + 1;
-
-  // Fetch user roles
-  const member = await interaction.guild.members.fetch(userId);
-  const allowedRoleIds = [
-    "1206480988000223305", // STAR
-    "1206481447582433291", // DIAMOND
-    "1206486307874934784", // MILK
-    "1206487990965108788", // WRATH
-  ];
-
-  const matchingRoles = member.roles.cache
-    .filter((role) => allowedRoleIds.includes(role.id))
-    .sort((a, b) => b.position - a.position);
-
-  const primaryRole = matchingRoles.first();
-
-  // Build the rank card
-  const card = new RankCardBuilder()
-    .setUsername(target.username)
-    .setDisplayName(target.globalName || target.username)
-    .setAvatar(target.displayAvatarURL({ extension: "png", size: 256 }))
-    .setCurrentXP(xp - currentLevelXP)
-    .setRequiredXP(nextLevelXP - currentLevelXP)
-    .setLevel(level)
-    .setRank(rankPosition.toString())
-    .setTextStyles({
-      level: "LVL:",
-      xp: "EXP :",
-      rank: (primaryRole?.name || "No") + " Role",
-    })
-    .setStyles({
-      statistics: {
-        level: {
-          text: {
-            style: {
-              fontSize: "30px",
-              left: "270px",
-              position: "absolute",
-            },
-          },
-          value: {
-            style: {
-              fontSize: "30px",
-            },
-          },
-        },
-        rank: {
-          text: {
-            style: {
-              position: "absolute",
-              marginLeft: "-60px",
-              fontSize: "30px",
-            },
-          },
-          value: {
-            style: {
-              position: "absolute",
-              fontSize: "80px",
-              bottom: "80px",
-              left: "500px",
-            },
-          },
-        },
-        xp: {
-          text: {
-            style: {
-              fontSize: "30px",
-              position: "absolute",
-              left: "380px",
-            },
-          },
-          value: {
-            style: {
-              fontSize: "30px",
-            },
-          },
-        },
-      },
-      username: {
-        name: {
-          style: {
-            fontSize: "55px",
-            marginTop: "-10px",
-            marginLeft: "10px",
-            marginBottom: "50px",
-          },
-        },
-        handle: {
-          style: {
-            fontSize: "30px",
-            marginTop: "-60px",
-            marginLeft: "10px",
-            marginBottom: "70px",
-          },
-        },
-      },
-      progressbar: {
-        thumb: {
-          style: {
-            height: "40px",
-            bottom: "20px",
-            backgroundColor: primaryRole?.hexColor || "white",
-            position: "absolute",
-          },
-        },
-        track: {
-          style: {
-            height: "40px",
-            bottom: "20px",
-            position: "absolute",
-          },
-        },
-      },
-    });
-
-  const buffer = await card.build({ format: "png" });
-  const attachment = new AttachmentBuilder(buffer, { name: "rank.png" });
-
-  return interaction.reply({ files: [attachment] });
+  return interaction.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle(`🏅 ${target.username}'s Rank`)
+        .setColor(0x3399ff)
+        .addFields(
+          { name: "Level", value: `${level}`, inline: true },
+          { name: "XP", value: `${xp}`, inline: true },
+          { name: "Next Level", value: `${nextLevelXP} XP`, inline: true },
+          { name: "Progress", value: `\`${bar}\` (${progress}/${needed})` },
+        ),
+    ],
+    ephemeral: false,
+  });
 }
 
 async function handleLevelChannel(interaction) {
@@ -1443,7 +1401,7 @@ async function handleLevelChannel(interaction) {
       embeds: [
         new EmbedBuilder()
           .setColor(0xff9900)
-          .setTitle("Invalid Channel")
+          .setTitle("⚠️ Invalid Channel")
           .setDescription("Please select a text-based channel."),
       ],
       ephemeral: true,
@@ -1770,6 +1728,7 @@ async function handleCustomName(interaction) {
 }
 
 async function handleCustomBio(interaction) {
+  // Check if the user is an administrator
   if (
     !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)
   ) {
@@ -1787,11 +1746,8 @@ async function handleCustomBio(interaction) {
   const newBio = interaction.options.getString("bio");
 
   try {
-    // ✅ Update bot application bio
+   
 
-    // ✅ Save in-memory and persist to disk
-    bioDescription = newBio;
-    saveStateToFile();
     await interaction.client.application.edit({
       description: newBio,
     });
@@ -1894,7 +1850,7 @@ async function handleCustomStatus(interaction) {
   }
 
   const status = interaction.options.getString("status"); // online, idle, dnd, invisible
-  const activityType = interaction.options.getString("activity_type"); // playing, watching, etc.
+  const activityType = interaction.options.getString("activity_type"); // PLAYING, WATCHING, LISTENING
   const activityText = interaction.options.getString("activity_text");
 
   const statusMap = {
@@ -1912,24 +1868,13 @@ async function handleCustomStatus(interaction) {
   };
 
   try {
-    // ✅ 1. Update in memory
-    botPresence = {
-      status: statusMap[status] || "online",
-      activityType: activityType.toLowerCase(),
-      activityText,
-    };
-
-    // ✅ 2. Save to disk
-    saveStateToFile();
-
-    // ✅ 3. Immediately apply presence
     await interaction.client.user.setPresence({
-      status: botPresence.status,
+      status: statusMap[status] || "online",
       activities: [
         {
-          name: botPresence.activityText,
+          name: activityText,
           type:
-            activityTypeMap[botPresence.activityType] || ActivityType.Playing,
+            activityTypeMap[activityType.toLowerCase()] || ActivityType.Playing,
         },
       ],
     });
@@ -1940,7 +1885,7 @@ async function handleCustomStatus(interaction) {
           .setColor(0x00ff00)
           .setTitle("Status Updated")
           .setDescription(
-            `Status set to **${botPresence.status}**, ${botPresence.activityType} **${botPresence.activityText}**.`,
+            `Status set to **${status}**, ${activityType} **${activityText}**.`,
           ),
       ],
       ephemeral: true,
@@ -2003,107 +1948,7 @@ async function handleAIChannelCommand(interaction) {
 
 async function handleSayCommand(interaction) {
   try {
-    // 🔒 Check admin permissions
-    if (
-      !interaction.member.permissions.has(
-        PermissionsBitField.Flags.Administrator,
-      )
-    ) {
-      return interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xff0000)
-            .setTitle("Permission Denied")
-            .setDescription("Only **Administrators** can use this command."),
-        ],
-        ephemeral: true,
-      });
-    }
-
-    const channel = interaction.options.getChannel("channel");
-    const message = interaction.options.getString("message");
-    const image1 = interaction.options.getAttachment("image1");
-    const image2 = interaction.options.getAttachment("image2");
-    const image3 = interaction.options.getAttachment("image3");
-
-    if (!channel || (!channel.isTextBased() && channel.type !== 15)) {
-      return interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xff0000)
-            .setTitle("Invalid Channel")
-            .setDescription(
-              "Please provide a valid **text** or **forum** channel.",
-            ),
-        ],
-        ephemeral: true,
-      });
-    }
-
-    const files = [image1, image2, image3].filter(Boolean);
-
-    // ⏳ Defer early to prevent timeout
-    await interaction.deferReply({ ephemeral: true });
-
-    if (channel.type === 15) {
-      // 🧵 Forum channel (type 15): create a new thread with a post
-      await channel.threads.create({
-        name: message.slice(0, 90) || "New Thread",
-        message: {
-          content: message,
-          files,
-        },
-      });
-    } else {
-      // 💬 Text channel: just send a message
-      await channel.send({
-        content: message,
-        files,
-      });
-    }
-
-    // ✅ Confirmation message
-    await interaction.editReply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0x00ff00)
-          .setTitle("Message Sent")
-          .setDescription(`Message sent to ${channel}.`),
-      ],
-    });
-  } catch (error) {
-    console.error("Error in /say command:", error);
-
-    if (interaction.deferred) {
-      await interaction.editReply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xff0000)
-            .setTitle("Something Went Wrong")
-            .setDescription(
-              "An unexpected error occurred. Please try again later.",
-            ),
-        ],
-      });
-    } else {
-      await interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xff0000)
-            .setTitle("Something Went Wrong")
-            .setDescription(
-              "An unexpected error occurred. Please try again later.",
-            ),
-        ],
-        ephemeral: true,
-      });
-    }
-  }
-}
-
-async function handleSayEmbed(interaction) {
-  try {
-    // Check if user is an Administrator
+    // Permissions check
     if (
       !interaction.member.permissions.has(
         PermissionsBitField.Flags.Administrator,
@@ -2123,86 +1968,62 @@ async function handleSayEmbed(interaction) {
     }
 
     const channel = interaction.options.getChannel("channel");
+    const message = interaction.options.getString("message");
+    const image = interaction.options.getAttachment("image");
+
+    // Channel validation
     if (!channel || !channel.isTextBased()) {
       return interaction.reply({
         embeds: [
           new EmbedBuilder()
             .setColor(0xff0000)
             .setTitle("Invalid Channel")
-            .setDescription("Please choose a valid text channel or forum."),
+            .setDescription("Please provide a valid text channel or thread."),
         ],
         ephemeral: true,
       });
     }
 
-    // Collect all options
-    const title = interaction.options.getString("title");
-    const description = interaction.options.getString("description");
-    const colorInput = interaction.options.getString("color");
-    const url = interaction.options.getString("url");
-    const author = interaction.options.getString("author");
-    const authorIcon = interaction.options.getString("author_icon");
-    const thumbnail = interaction.options.getString("thumbnail");
-    const image = interaction.options.getString("image");
-    const footer = interaction.options.getString("footer");
-    const footerIcon = interaction.options.getString("footer_icon");
-    const addTimestamp = interaction.options.getBoolean("timestamp");
-    const fieldsRaw = interaction.options.getString("fields");
+    // Attempt to send message
+    try {
+      await channel.send({
+        content: message,
+        files: image ? [image] : [],
+      });
 
-    // Construct embed
-    const embed = new EmbedBuilder();
-
-    if (title) embed.setTitle(title);
-    if (description) embed.setDescription(description);
-    if (colorInput) {
-      try {
-        embed.setColor(
-          /^#/.test(colorInput)
-            ? parseInt(colorInput.slice(1), 16)
-            : colorInput.toUpperCase(),
-        );
-      } catch {
-        embed.setColor(0x3498db); // fallback color
-      }
+      await interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x00ff00)
+            .setTitle("Message Sent")
+            .setDescription(`Message sent to ${channel}`),
+        ],
+        ephemeral: true,
+      });
+    } catch (sendError) {
+      console.error("Error sending message:", sendError);
+      return interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xff0000)
+            .setTitle("Failed to Send Message")
+            .setDescription(
+              "An error occurred while sending the message. Please try again later.",
+            ),
+        ],
+        ephemeral: true,
+      });
     }
-
-    if (url) embed.setURL(url);
-    if (author) embed.setAuthor({ name: author, iconURL: authorIcon || null });
-    if (thumbnail) embed.setThumbnail(thumbnail);
-    if (image) embed.setImage(image);
-    if (footer) embed.setFooter({ text: footer, iconURL: footerIcon || null });
-    if (addTimestamp) embed.setTimestamp();
-
-    if (fieldsRaw) {
-      try {
-        const fields = JSON.parse(fieldsRaw);
-        if (Array.isArray(fields)) {
-          embed.addFields(fields);
-        }
-      } catch (err) {
-        console.warn("Invalid JSON for fields:", err);
-      }
-    }
-
-    await channel.send({ embeds: [embed] });
-
-    return interaction.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0x00ff00)
-          .setTitle("Embed Sent")
-          .setDescription(`Embed sent to ${channel}`),
-      ],
-      ephemeral: true,
-    });
   } catch (err) {
-    console.error("Error in say-embed:", err);
+    console.error("Unexpected error in /say command:", err);
     return interaction.reply({
       embeds: [
         new EmbedBuilder()
           .setColor(0xff0000)
-          .setTitle("Unexpected Error")
-          .setDescription("Something went wrong. Please try again later."),
+          .setTitle("Something Went Wrong")
+          .setDescription(
+            "An unexpected error occurred. Please try again later.",
+          ),
       ],
       ephemeral: true,
     });
@@ -2213,6 +2034,7 @@ async function handlePurgeCommand(interaction) {
   const amount = interaction.options.getInteger("amount");
   const filter = interaction.options.getString("filter");
   const user = interaction.options.getUser("user");
+
   if (interaction.channel.type === ChannelType.DM) {
     const dmEmbed = new EmbedBuilder()
       .setColor(0xff0000)

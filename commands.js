@@ -11,6 +11,10 @@ const commands = [
     description: "Clears the conversation history.",
   },
   {
+    name: "ai-settings",
+    description: "Opens Up Settings.",
+  },
+  {
     name: "ai-blacklist",
     description: "Blacklists a user from using certain interactions",
     options: [
@@ -73,9 +77,22 @@ commands.push({
   ],
 });
 
+commands.push({
+  name: "custom-bio",
+  description: "Update the bot's bio (Admin only).",
+  options: [
+    {
+      type: 3, // STRING
+      name: "bio",
+      description: "The new bio to set for the bot.",
+      required: true,
+    },
+  ],
+});
+
 // Add these to your commands array
 commands.push({
-  name: "level-settings",
+  name: "xp-settings",
   description: "Set XP gain range and cooldown",
   options: [
     {
@@ -100,7 +117,7 @@ commands.push({
 });
 
 commands.push({
-  name: "level-announcement",
+  name: "level-channel",
   description: "Set the channel where level-up announcements will be sent",
   options: [
     {
@@ -220,128 +237,29 @@ commands.push({
   ],
 });
 
-commands.push({
-  name: "say-embed",
-  description: "Send a custom embed to a selected channel",
-  options: [
-    {
-      type: 7, // CHANNEL
-      name: "channel",
-      description: "Channel to send the embed to",
-      required: true,
-    },
-    {
-      type: 3,
-      name: "title",
-      description: "Embed title",
-      required: true,
-    },
-    {
-      type: 3,
-      name: "description",
-      description: "Embed description",
-      required: false,
-    },
-    {
-      type: 3,
-      name: "color",
-      description: "Embed color (hex or name, e.g. #00ff00 or RED)",
-      required: false,
-    },
-    {
-      type: 3,
-      name: "url",
-      description: "URL to link to the title",
-      required: false,
-    },
-    {
-      type: 3,
-      name: "author",
-      description: "Author name",
-      required: false,
-    },
-    {
-      type: 3,
-      name: "author_icon",
-      description: "Author icon URL",
-      required: false,
-    },
-    {
-      type: 3,
-      name: "thumbnail",
-      description: "Thumbnail image URL",
-      required: false,
-    },
-    {
-      type: 3,
-      name: "image",
-      description: "Main image URL",
-      required: false,
-    },
-    {
-      type: 3,
-      name: "footer",
-      description: "Footer text",
-      required: false,
-    },
-    {
-      type: 3,
-      name: "footer_icon",
-      description: "Footer icon URL",
-      required: false,
-    },
-    {
-      type: 5,
-      name: "timestamp",
-      description: "Add a timestamp to the embed",
-      required: false,
-    },
-    {
-      type: 3,
-      name: "fields",
-      description:
-        'JSON array of fields: [{"name":"","value":"","inline":true}]',
-      required: false,
-    },
-  ],
-});
-
-commands.push({
-  name: "custom-bio",
-  description: "Update the bot's bio (Admin only).",
-  options: [
-    {
-      type: 3, // STRING
-      name: "bio",
-      description: "The new bio to set for the bot.",
-      required: true,
-    },
-  ],
-});
 
 commands.push({
   name: "say",
-  description: "Send a message (with optional images) to a specified channel.",
+  description: "Send a message (with optional image) to a channel.",
   options: [
     {
       type: 7, // CHANNEL
       name: "channel",
-      description: "The channel to send the message in.",
+      description: "The target text channel or thread.",
       required: true,
     },
     {
       type: 3, // STRING
       name: "message",
-      description: "The message content to send.",
+      description: "The message to send.",
       required: false,
     },
-    // Support up to 5 optional image attachments
-    ...[1, 2, 3, 4, 5].map((i) => ({
+    {
       type: 11, // ATTACHMENT
-      name: `image${i}`,
-      description: `Optional image attachment #${i}`,
+      name: "image",
+      description: "Optional image to send with the message.",
       required: false,
-    })),
+    },
   ],
 });
 
